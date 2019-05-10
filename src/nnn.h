@@ -41,6 +41,8 @@ enum action {
 	SEL_NAV_IN,
 	SEL_NEXT,
 	SEL_PREV,
+	SEL_RANGENEXT,
+	SEL_RANGEPREV,
 	SEL_PGDN,
 	SEL_PGUP,
 	SEL_CTRL_D,
@@ -69,6 +71,7 @@ enum action {
 	SEL_ARCHIVE,
 	SEL_ARCHIVELS,
 	SEL_EXTRACT,
+	SEL_ALPHABETIC,
 	SEL_FSIZE,  /* file size */
 	SEL_ASIZE,  /* apparent size */
 	SEL_BSIZE,  /* block size */
@@ -76,12 +79,11 @@ enum action {
 	SEL_WILD,
 	SEL_REDRAW,
 	SEL_COPY,
-	SEL_COPYMUL,
 	SEL_COPYALL,
+	SEL_COPYNONE,
 	SEL_COPYLIST,
 	SEL_CP,
 	SEL_MV,
-	SEL_RMMUL,
 	SEL_RM,
 	SEL_OPENWITH,
 	SEL_NEW,
@@ -127,6 +129,10 @@ static struct key bindings[] = {
 	/* Previous */
 	{ 'k',            SEL_PREV },
 	{ KEY_UP,         SEL_PREV },
+	/* Range select down */
+	{ 'J',            SEL_RANGENEXT },
+	/* Range select up */
+	{ 'K',            SEL_RANGEPREV },
 	/* Page down */
 	{ KEY_NPAGE,      SEL_PGDN },
 	/* Page up */
@@ -138,7 +144,6 @@ static struct key bindings[] = {
 	/* First entry */
 	{ KEY_HOME,       SEL_HOME },
 	{ 'g',            SEL_HOME },
-	{ CONTROL('A'),   SEL_HOME },
 	/* Last entry */
 	{ KEY_END,        SEL_END },
 	{ 'G',            SEL_END },
@@ -187,26 +192,26 @@ static struct key bindings[] = {
 	{ 'F',            SEL_ARCHIVELS },
 	/* Extract archive */
 	{ CONTROL('F'),   SEL_EXTRACT },
-	/* Toggle sort by size */
+	/* Sort alphabetically */
+	{ 'a',            SEL_ALPHABETIC },
+	/* Sort by size */
 	{ 's',            SEL_FSIZE },
 	/* Sort by apparent size including dir contents */
 	{ 'S',            SEL_ASIZE },
 	/* Sort by total block count including dir contents */
 	{ CONTROL('J'),   SEL_BSIZE },
-	/* Toggle sort by time */
+	/* Sort by time */
 	{ 't',            SEL_MTIME },
 	/* Wild load */
 	{ CONTROL('W'),   SEL_WILD },
 	/* Redraw window */
 	{ CONTROL('L'),   SEL_REDRAW },
 	/* Copy currently selected file path */
-	{ CONTROL('K'),   SEL_COPY },
 	{ ' ',            SEL_COPY },
-	/* Toggle copy multiple file paths */
-	{ 'K',            SEL_COPYMUL },
-	{ CONTROL('Y'),   SEL_COPYMUL },
 	/* Select all files in current dir */
-	{ 'Y',            SEL_COPYALL },
+	{ CONTROL('A'),   SEL_COPYALL },
+	/* Clear selection (Escape key) */
+	{ CONTROL('['),   SEL_COPYNONE },
 	/* Show list of copied files */
 	{ 'y',            SEL_COPYLIST },
 	/* Copy from copy buffer */
@@ -214,9 +219,7 @@ static struct key bindings[] = {
 	/* Move from copy buffer */
 	{ 'V',            SEL_MV },
 	/* Delete from copy buffer */
-	{ 'X',            SEL_RMMUL },
-	/* Delete currently selected */
-	{ CONTROL('X'),   SEL_RM },
+	{ 'X',            SEL_RM },
 	/* Open in a custom application */
 	{ CONTROL('O'),   SEL_OPENWITH },
 	/* Create a new file */

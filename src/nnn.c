@@ -197,18 +197,27 @@ typedef struct {
 	char *loc;
 } bm;
 
+enum sort_order {
+	SORT_ALPHABETIC = 1<<0,
+	SORT_TIME = 1<<1,
+	SORT_SIZE = 1<<2,
+	SORT_APPARENTSIZE = 1<<3,
+	SORT_BLOCKS = 1<<4,
+	SORT_NONE = 1<<5,
+};
+
+#define REVERSE_SORT (1<<8)
+#define METHOD(sort) ((sort) & ~REVERSE_SORT)
+#define USES_BLOCKS(sort) ((sort) & (SORT_APPARENTSIZE | SORT_BLOCKS))
+
 /*
  * Settings
  * NOTE: update default values if changing order
  */
 typedef struct {
+	enum sort_order sorting;
 	uint filtermode : 1;  /* Set to enter filter mode */
-	uint mtimeorder : 1;  /* Set to sort by time modified */
-	uint sizeorder  : 1;  /* Set to sort by file size */
-	uint apparentsz : 1;  /* Set to sort by apparent size (disk usage) */
-	uint blkorder   : 1;  /* Set to sort by blocks used (disk usage) */
 	uint showhidden : 1;  /* Set to show hidden files */
-	uint copymode   : 1;  /* Set when copying files */
 	uint showdetail : 1;  /* Clear to show fewer file info */
 	uint ctxactive  : 1;  /* Context active or not */
 	uint reserved   : 7;
@@ -225,7 +234,6 @@ typedef struct {
 	uint runctx     : 2;  /* The context in which plugin is to be run */
 	uint restrict0b : 1;  /* Restrict 0-byte file opening */
 	uint filter_re  : 1;  /* Use regex filters */
-	uint wild       : 1;  /* Do not sort entries on dir load */
 	uint trash      : 1;  /* Move removed files to trash */
 } settings;
 
@@ -243,13 +251,9 @@ typedef struct {
 
 /* Configuration, contexts */
 static settings cfg = {
+	SORT_ALPHABETIC,
 	0, /* filtermode */
-	0, /* mtimeorder */
-	0, /* sizeorder */
-	0, /* apparentsz */
-	0, /* blkorder */
 	0, /* showhidden */
-	0, /* copymode */
 	1, /* showdetail */
 	1, /* ctxactive */
 	0, /* reserved */
@@ -265,7 +269,6 @@ static settings cfg = {
 	0, /* runctx */
 	0, /* restrict0b */
 	1, /* filter_re */
-	0, /* wild */
 	0, /* trash */
 };
 
@@ -292,7 +295,6 @@ static blkcnt_t dir_blocks;
 static ulong num_files;
 static bm bookmark[BM_MAX];
 static size_t g_tmpfplen;
-static uchar g_crc;
 static uchar BLK_SHIFT = 9;
 static bool interrupted = FALSE;
 
@@ -475,45 +477,6 @@ static int dentfind(const char *fname, int n);
 
 /* Functions */
 
-/*
- * CRC8 source:
- *   https://barrgroup.com/Embedded-Systems/How-To/CRC-Calculation-C-Code
- */
-static uchar crc8fast(const uchar * const message, size_t n)
-{
-	uchar data, remainder;
-	size_t byte;
-
-	/* CRC data */
-	static const uchar crc8table[CRC8_TABLE_LEN] __attribute__ ((aligned)) = {
-		  0,  94, 188, 226,  97,  63, 221, 131, 194, 156, 126,  32, 163, 253,  31,  65,
-		157, 195,  33, 127, 252, 162,  64,  30,  95,   1, 227, 189,  62,  96, 130, 220,
-		 35, 125, 159, 193,  66,  28, 254, 160, 225, 191,  93,   3, 128, 222,  60,  98,
-		190, 224,   2,  92, 223, 129,  99,  61, 124,  34, 192, 158,  29,  67, 161, 255,
-		 70,  24, 250, 164,  39, 121, 155, 197, 132, 218,  56, 102, 229, 187,  89,   7,
-		219, 133, 103,  57, 186, 228,   6,  88,  25,  71, 165, 251, 120,  38, 196, 154,
-		101,  59, 217, 135,   4,  90, 184, 230, 167, 249,  27,  69, 198, 152, 122,  36,
-		248, 166,  68,  26, 153, 199,  37, 123,  58, 100, 134, 216,  91,   5, 231, 185,
-		140, 210,  48, 110, 237, 179,  81,  15,  78,  16, 242, 172,  47, 113, 147, 205,
-		 17,  79, 173, 243, 112,  46, 204, 146, 211, 141, 111,  49, 178, 236,  14,  80,
-		175, 241,  19,  77, 206, 144, 114,  44, 109,  51, 209, 143,  12,  82, 176, 238,
-		 50, 108, 142, 208,  83,  13, 239, 177, 240, 174,  76,  18, 145, 207,  45, 115,
-		202, 148, 118,  40, 171, 245,  23,  73,   8,  86, 180, 234, 105,  55, 213, 139,
-		 87,   9, 235, 181,  54, 104, 138, 212, 149, 203,  41, 119, 244, 170,  72,  22,
-		233, 183,  85,  11, 136, 214,  52, 106,  43, 117, 151, 201,  74,  20, 246, 168,
-		116,  42, 200, 150,  21,  75, 169, 247, 182, 232,  10,  84, 215, 137, 107,  53,
-	};
-
-	/* Divide the message by the polynomial, a byte at a time */
-	for (remainder = byte = 0; byte < n; ++byte) {
-		data = message[byte] ^ (remainder >> (WIDTH - 8));
-		remainder = crc8table[data] ^ (remainder << 8);
-	}
-
-	/* The final remainder is the CRC */
-	return remainder;
-}
-
 static void sigint_handler(int sig)
 {
 	interrupted = TRUE;
@@ -589,15 +552,9 @@ static int get_input(const char *prompt)
 	return r;
 }
 
-static void xdelay(void)
-{
-	refresh();
-	usleep(350000); /* 350 ms delay */
-}
-
 static char confirm_force(void)
 {
-	int r = get_input("use force? [y/Y]");
+	int r = get_input("use force? [y/N]");
 
 	if (r == 'y' || r == 'Y')
 		return 'f'; /* forceful */
@@ -755,6 +712,19 @@ static void writecp(const char *buf, const size_t buflen)
 		printwarn(NULL);
 }
 
+static char *findfpath(const char *path, const size_t len)
+{
+	char *p;
+	for (p = pcopybuf; p < &pcopybuf[copybufpos]; ) {
+		if (strncmp(p, path, len) == 0)
+			return p;
+		while (*p && *p != '\n' && p < &pcopybuf[copybufpos])
+			++p;
+		++p;
+	}
+	return NULL;
+}
+
 static void appendfpath(const char *path, const size_t len)
 {
 	if ((copybufpos >= copybuflen) || ((len + 3) > (copybuflen - copybufpos))) {
@@ -765,6 +735,35 @@ static void appendfpath(const char *path, const size_t len)
 	}
 
 	copybufpos += xstrlcpy(pcopybuf + copybufpos, path, len);
+}
+
+static int removefpath(const char *path, const size_t len)
+{
+	char *p = findfpath(path, len);
+	if (!p)
+		return 0;
+
+	memmove(p, p + len + 1, copybufpos - (p - pcopybuf));
+	copybufpos -= (p - pcopybuf);
+	return 1;
+}
+
+static int togglefpath(const char *path, const size_t len)
+{
+	if (removefpath(path, len))
+		return -1;
+
+	appendfpath(path, len);
+	return 1;
+}
+
+static void clearselection()
+{
+	int i;
+	for (i = 0; i < ndents; i++)
+		dents[i].flags &= ~FILE_COPIED;
+	copybufpos = 0;
+	unlink(g_cppath);
 }
 
 /* Write selected file paths to fd, linefeed separated */
@@ -815,40 +814,6 @@ static void showcplist(void)
 	unlink(g_tmpfpath);
 }
 
-static bool cpsafe(void)
-{
-	/* Fail if selection file path not generated */
-	if (!g_cppath) {
-		printmsg("selection file not found");
-		return FALSE;
-	}
-
-	/* Warn if selection not completed */
-	if (cfg.copymode) {
-		printmsg("finish selection first");
-		return FALSE;
-	}
-
-	/* Fail if selection file path isn't accessible */
-	if (access(g_cppath, R_OK | W_OK) == -1) {
-		printmsg("check selection file permission");
-		return FALSE;
-	}
-
-	return TRUE;
-}
-
-/* Reset copy indicators */
-static void resetcpind(void)
-{
-	int r = 0;
-
-	/* Reset copy indicators */
-	for (; r < ndents; ++r)
-		if (dents[r].flags & FILE_COPIED)
-			dents[r].flags &= ~FILE_COPIED;
-}
-
 /* Initialize curses mode */
 static bool initcurses(void)
 {
@@ -880,8 +845,10 @@ static bool initcurses(void)
 	use_default_colors();
 
 	/* Initialize default colors */
-	for (i = 0; i <  CTX_MAX; ++i)
+	for (i = 0; i < CTX_MAX; ++i)
 		init_pair(i + 1, g_ctx[i].color, -1);
+
+	init_pair(i + 1, 0, 7);
 
 	settimeout(); /* One second */
 	set_escdelay(25);
@@ -1073,20 +1040,33 @@ static void cpstr(char *buf)
 {
 	snprintf(buf, CMD_LEN_MAX,
 #ifdef __linux__
-		 "xargs -0 -a %s -%c src %s src .", g_cppath, REPLACE_STR, cp);
+		 "xargs -0 -a %s -%c src %s src .", g_cppath, REPLACE_STR, cp
 #else
-		 "cat %s | xargs -0 -o -%c src cp -iRp src .", g_cppath, REPLACE_STR);
+		 "cat %s | xargs -0 -o -%c src cp -iRp src .", g_cppath, REPLACE_STR
 #endif
+	);
+}
+
+static void dupstr(char *buf)
+{
+	snprintf(buf, CMD_LEN_MAX,
+#ifdef __linux__
+		 "xargs -0 -a %s -%c src %s src src.copy", g_cppath, REPLACE_STR, cp
+#else
+		 "cat %s | xargs -0 -o -%c src cp -iRp src src.copy", g_cppath, REPLACE_STR
+#endif
+	);
 }
 
 static void mvstr(char *buf)
 {
 	snprintf(buf, CMD_LEN_MAX,
 #ifdef __linux__
-		 "xargs -0 -a %s -%c src %s src .", g_cppath, REPLACE_STR, mv);
+		 "xargs -0 -a %s -%c src %s src .", g_cppath, REPLACE_STR, mv
 #else
-		 "cat %s | xargs -0 -o -%c src mv -i src .", g_cppath, REPLACE_STR);
+		 "cat %s | xargs -0 -o -%c src mv -i src .", g_cppath, REPLACE_STR
 #endif
+	);
 }
 
 static void rmmulstr(char *buf)
@@ -1094,29 +1074,19 @@ static void rmmulstr(char *buf)
 	if (cfg.trash) {
 		snprintf(buf, CMD_LEN_MAX,
 #ifdef __linux__
-			 "xargs -0 -a %s trash-put", g_cppath);
+			 "xargs -0 -a %s trash-put", g_cppath
 #else
-			 "cat %s | xargs -0 trash-put", g_cppath);
+			 "cat %s | xargs -0 trash-put", g_cppath
 #endif
+		);
 	} else {
 		snprintf(buf, CMD_LEN_MAX,
 #ifdef __linux__
-			 "xargs -0 -a %s rm -%cr", g_cppath, confirm_force());
+			 "xargs -0 -a %s rm -%cr", g_cppath, confirm_force()
 #else
-			 "cat %s | xargs -0 -o rm -%cr", g_cppath, confirm_force());
+			 "cat %s | xargs -0 -o rm -%cr", g_cppath, confirm_force()
 #endif
-	}
-}
-
-static void xrm(char *path)
-{
-	if (cfg.trash)
-		spawn("trash-put", path, NULL, NULL, F_NORMAL);
-	else {
-		char rm_opts[] = "-ir";
-
-		rm_opts[1] = confirm_force();
-		spawn("rm", rm_opts, path, NULL, F_NORMAL);
+		);
 	}
 }
 
@@ -1151,14 +1121,6 @@ static bool write_lastdir(const char *curpath)
 	return TRUE;
 }
 
-static int digit_compare(const char *a, const char *b)
-{
-	while (*a && *b && *a == *b)
-		++a, ++b;
-
-	return *a - *b;
-}
-
 /*
  * We assume none of the strings are NULL.
  *
@@ -1169,76 +1131,20 @@ static int digit_compare(const char *a, const char *b)
  */
 static int xstricmp(const char * const s1, const char * const s2)
 {
-	const char *c1, *c2, *m1, *m2;
-	int count1 = 0, count2 = 0, bias;
-	char sign[2];
-
-	sign[0] = '+';
-	sign[1] = '+';
-
-	c1 = s1;
-	while (ISBLANK(*c1))
-		++c1;
-
-	c2 = s2;
-	while (ISBLANK(*c2))
-		++c2;
-
-	if (*c1 == '-' || *c1 == '+') {
-		if (*c1 == '-')
-			sign[0] = '-';
-		++c1;
+	char *c1 = s1, *c2 = s2;
+	long count1 = 0, count2 = 0;
+keep_going:
+	while (*c1 && *c1 == *c2) {
+		if (xisdigit(*c1))
+			break;
+		++c1, ++c2;
 	}
-
-	if (*c2 == '-' || *c2 == '+') {
-		if (*c2 == '-')
-			sign[1] = '-';
-		++c2;
-	}
-
 	if (xisdigit(*c1) && xisdigit(*c2)) {
-		while (*c1 == '0')
-			++c1;
-		m1 = c1;
-
-		while (*c2 == '0')
-			++c2;
-		m2 = c2;
-
-		while (xisdigit(*c1)) {
-			++count1;
-			++c1;
-		}
-		while (ISBLANK(*c1))
-			++c1;
-
-		while (xisdigit(*c2)) {
-			++count2;
-			++c2;
-		}
-		while (ISBLANK(*c2))
-			++c2;
-
-		if (*c1 && !*c2)
-			return 1;
-
-		if (!*c1 && *c2)
-			return -1;
-
-		if (!*c1 && !*c2) {
-			if (sign[0] != sign[1])
-				return ((sign[0] == '+') ? 1 : -1);
-
-			if (count1 > count2)
-				return 1;
-
-			if (count1 < count2)
-				return -1;
-
-			bias = digit_compare(m1, m2);
-			if (bias)
-				return bias;
-		}
+		count1 = strtol(c1, &c1, 10);
+		count2 = strtol(c2, &c2, 10);
+		if (count1 != count2)
+			return count1 < count2 ? -1 : 1;
+		goto keep_going;
 	}
 
 	return strcoll(s1, s2);
@@ -1364,37 +1270,34 @@ static int entrycmp(const void *va, const void *vb)
 {
 	const struct entry *pa = (pEntry)va;
 	const struct entry *pb = (pEntry)vb;
+	int sign = cfg.sorting & REVERSE_SORT ? -1 : 1;
 
 	if ((pb->flags & DIR_OR_LINK_TO_DIR) != (pa->flags & DIR_OR_LINK_TO_DIR)) {
 		if (pb->flags & DIR_OR_LINK_TO_DIR)
-			return 1;
+			return 1*sign;
 
-		return -1;
+		return -1*sign;
 	}
 
 	/* Do the actual sorting */
-	if (cfg.mtimeorder) {
-		if (pb->t >= pa->t)
-			return (int)(pb->t - pa->t);
-
-		return -1;
+	switch (METHOD(cfg.sorting)) {
+		case SORT_TIME:
+			if (pb->t >= pa->t)
+				return (int)(pb->t - pa->t);
+			return -1*sign;
+		case SORT_SIZE:
+			if (pb->size > pa->size)
+				return 1*sign;
+			if (pb->size < pa->size)
+				return -1*sign;
+		case SORT_APPARENTSIZE: // fallthrough
+		case SORT_BLOCKS:
+			if (pb->blocks > pa->blocks)
+				return 1*sign;
+			if (pb->blocks < pa->blocks)
+				return -1*sign;
 	}
-
-	if (cfg.sizeorder) {
-		if (pb->size > pa->size)
-			return 1;
-
-		if (pb->size < pa->size)
-			return -1;
-	} else if (cfg.blkorder) {
-		if (pb->blocks > pa->blocks)
-			return 1;
-
-		if (pb->blocks < pa->blocks)
-			return -1;
-	}
-
-	return cmpfn(pa->name, pb->name);
+	return cmpfn(pa->name, pb->name)*sign;
 }
 
 /*
@@ -1438,7 +1341,7 @@ static int nextsel(int presel)
 		 * Check for changes every odd second.
 		 */
 #ifdef LINUX_INOTIFY
-		if (!cfg.blkorder && inotify_wd >= 0 && (idle & 1)) {
+		if (USES_BLOCKS(cfg.sorting) && inotify_wd >= 0 && (idle & 1)) {
 			i = read(inotify_fd, inotify_buf, EVENT_BUF_LEN);
 			if (i > 0) {
 				for (ptr = inotify_buf; ptr < inotify_buf + i;
@@ -1459,7 +1362,7 @@ static int nextsel(int presel)
 			}
 		}
 #elif defined(BSD_KQUEUE)
-		if (!cfg.blkorder && event_fd >= 0 && idle & 1
+		if (USES_BLOCKS(cfg.sorting) && event_fd >= 0 && idle & 1
 		    && kevent(kq, events_to_monitor, NUM_EVENT_SLOTS,
 			      event_data, NUM_EVENT_FDS, &gtimeout) > 0)
 			c = CONTROL('L');
@@ -2080,7 +1983,6 @@ static char *coolsize(off_t size)
 static void printent(const struct entry *ent, int sel, uint namecols)
 {
 	const char *pname = unescape(ent->name, namecols);
-	const char cp = (ent->flags & FILE_COPIED) ? '+' : ' ';
 	char ind[2];
 	mode_t mode = ent->mode;
 
@@ -2113,14 +2015,19 @@ static void printent(const struct entry *ent, int sel, uint namecols)
 
 	/* Directories are always shown on top */
 	resetdircolor(ent->flags);
-
-	printw("%s%c%s%s\n", CURSYM(sel), cp, pname, ind);
+	printw("%s %s%s\n", CURSYM(sel), pname, ind);
+	if (ent->flags & FILE_COPIED) {
+		int y = getcury(stdscr);
+		attroff(A_REVERSE);
+		mvaddch(y-1, 2, ' ' | COLOR_PAIR(CTX_MAX + 1));
+		move(y, 0);
+	}
 }
 
 static void printent_long(const struct entry *ent, int sel, uint namecols)
 {
 	char timebuf[18], permbuf[4], ind1 = '\0', ind2[] = "\0\0";
-	const char cp = (ent->flags & FILE_COPIED) ? '+' : ' ';
+	const chtype cp = (ent->flags & FILE_COPIED) ? ' ' | COLOR_PAIR(CTX_MAX + 1) : ' ';
 
 	/* Timestamp */
 	strftime(timebuf, 18, "%F %R", localtime(&ent->t));
@@ -2140,30 +2047,31 @@ static void printent_long(const struct entry *ent, int sel, uint namecols)
 	/* Directories are always shown on top */
 	resetdircolor(ent->flags);
 
+	addch(cp);
 	if (sel)
 		attron(A_REVERSE);
 
 	switch (ent->mode & S_IFMT) {
 	case S_IFREG:
 		if (ent->mode & 0100)
-			printw("%c%-16.16s  %s %8.8s* %s*\n", cp, timebuf, permbuf,
-			       coolsize(cfg.blkorder ? ent->blocks << BLK_SHIFT : ent->size), pname);
+			printw("%-16.16s  %s %8.8s* %s*\n", timebuf, permbuf,
+			       coolsize(USES_BLOCKS(cfg.sorting) ? ent->blocks << BLK_SHIFT : ent->size), pname);
 		else
-			printw("%c%-16.16s  %s %8.8s  %s\n", cp, timebuf, permbuf,
-			       coolsize(cfg.blkorder ? ent->blocks << BLK_SHIFT : ent->size), pname);
+			printw("%-16.16s  %s %8.8s  %s\n", timebuf, permbuf,
+			       coolsize(USES_BLOCKS(cfg.sorting) ? ent->blocks << BLK_SHIFT : ent->size), pname);
 		break;
 	case S_IFDIR:
-		if (cfg.blkorder)
-			printw("%c%-16.16s  %s %8.8s/ %s/\n",
-			       cp, timebuf, permbuf, coolsize(ent->blocks << BLK_SHIFT), pname);
+		if (USES_BLOCKS(cfg.sorting))
+			printw("%-16.16s  %s %8.8s/ %s/\n",
+			       timebuf, permbuf, coolsize(ent->blocks << BLK_SHIFT), pname);
 		else
-			printw("%c%-16.16s  %s        /  %s/\n", cp, timebuf, permbuf, pname);
+			printw("%-16.16s  %s        /  %s/\n", timebuf, permbuf, pname);
 		break;
 	case S_IFLNK:
 		if (ent->flags & DIR_OR_LINK_TO_DIR)
-			printw("%c%-16.16s  %s       @/  %s@\n", cp, timebuf, permbuf, pname);
+			printw("%-16.16s  %s       @/  %s@\n", timebuf, permbuf, pname);
 		else
-			printw("%c%-16.16s  %s        @  %s@\n", cp, timebuf, permbuf, pname);
+			printw("%-16.16s  %s        @  %s@\n", timebuf, permbuf, pname);
 		break;
 	case S_IFSOCK:
 		ind1 = ind2[0] = '='; // fallthrough
@@ -2178,8 +2086,8 @@ static void printent_long(const struct entry *ent, int sel, uint namecols)
 			ind1 = 'c'; // fallthrough
 	default:
 		if (!ind1)
-			ind1 = ind2[0] = '?';
-		printw("%c%-16.16s  %s        %c  %s%s\n", cp, timebuf, permbuf, ind1, pname, ind2);
+			ind1 = ind2[0] = '?'; 
+		printw("%-16.16s  %s        %c  %s%s\n", timebuf, permbuf, ind1, pname, ind2);
 		break;
 	}
 
@@ -2192,11 +2100,7 @@ static void (*printptr)(const struct entry *ent, int sel, uint namecols) = &prin
 static void savecurctx(settings *curcfg, char *path, char *curname, int r /* next context num */)
 {
 	settings cfg = *curcfg;
-	bool copymode = cfg.copymode ? TRUE : FALSE;
 
-#ifdef DIR_LIMITED_COPY
-	g_crc = 0;
-#endif
 	/* Save current context */
 	xstrlcpy(g_ctx[cfg.curctx].c_name, curname, NAME_MAX + 1);
 	g_ctx[cfg.curctx].c_cfg = cfg;
@@ -2219,7 +2123,6 @@ static void savecurctx(settings *curcfg, char *path, char *curname, int r /* nex
 	}
 
 	/* Continue copy mode */
-	cfg.copymode = copymode;
 	cfg.curctx = r;
 
 	*curcfg = cfg;
@@ -2655,7 +2558,7 @@ static int dentfill(char *path, struct entry **dents)
 
 	int fd = dirfd(dirp);
 
-	if (cfg.blkorder) {
+	if (USES_BLOCKS(cfg.sorting)) {
 		num_files = 0;
 		dir_blocks = 0;
 
@@ -2674,7 +2577,7 @@ static int dentfill(char *path, struct entry **dents)
 	// if (!dp) /* We have opened the dir, at least . would be returned */
 	//	goto exit;
 
-	if (cfg.blkorder || dp->d_type == DT_UNKNOWN) {
+	if (USES_BLOCKS(cfg.sorting) || dp->d_type == DT_UNKNOWN) {
 		/*
 		 * Optimization added for filesystems which support dirent.d_type
 		 * see readdir(3)
@@ -2693,7 +2596,7 @@ static int dentfill(char *path, struct entry **dents)
 			continue;
 
 		if (!cfg.showhidden && namep[0] == '.') {
-			if (!cfg.blkorder)
+			if (!USES_BLOCKS(cfg.sorting))
 				continue;
 
 			if (fstatat(fd, namep, &sb, AT_SYMLINK_NOFOLLOW) == -1)
@@ -2710,7 +2613,7 @@ static int dentfill(char *path, struct entry **dents)
 					if (nftw(g_buf, nftw_fn, open_max,
 						 FTW_MOUNT | FTW_PHYS) == -1) {
 						DPRINTF_S("nftw failed");
-						dir_blocks += (cfg.apparentsz
+						dir_blocks += (METHOD(cfg.sorting) == SORT_APPARENTSIZE
 							       ? sb.st_size
 							       : sb.st_blocks);
 					} else
@@ -2722,7 +2625,7 @@ static int dentfill(char *path, struct entry **dents)
 					}
 				}
 			} else {
-				dir_blocks += (cfg.apparentsz ? sb.st_size : sb.st_blocks);
+				dir_blocks += (METHOD(cfg.sorting) == SORT_APPARENTSIZE ? sb.st_size : sb.st_blocks);
 				++num_files;
 			}
 
@@ -2788,7 +2691,7 @@ static int dentfill(char *path, struct entry **dents)
 		}
 		dentp->flags = 0;
 
-		if (cfg.blkorder) {
+		if (USES_BLOCKS(cfg.sorting)) {
 			if (S_ISDIR(sb.st_mode)) {
 				ent_blocks = 0;
 				num_saved = num_files + 1;
@@ -2799,7 +2702,7 @@ static int dentfill(char *path, struct entry **dents)
 				refresh();
 				if (nftw(g_buf, nftw_fn, open_max, FTW_MOUNT | FTW_PHYS) == -1) {
 					DPRINTF_S("nftw failed");
-					dentp->blocks = (cfg.apparentsz ? sb.st_size : sb.st_blocks);
+					dentp->blocks = (METHOD(cfg.sorting) == SORT_APPARENTSIZE ? sb.st_size : sb.st_blocks);
 				} else
 					dentp->blocks = ent_blocks;
 
@@ -2813,7 +2716,7 @@ static int dentfill(char *path, struct entry **dents)
 					return n;
 				}
 			} else {
-				dentp->blocks = (cfg.apparentsz ? sb.st_size : sb.st_blocks);
+				dentp->blocks = (METHOD(cfg.sorting) == SORT_APPARENTSIZE ? sb.st_size : sb.st_blocks);
 				dir_blocks += dentp->blocks;
 				++num_files;
 			}
@@ -2830,6 +2733,11 @@ static int dentfill(char *path, struct entry **dents)
 				dentp->flags |= DIR_OR_LINK_TO_DIR;
 		} else if (dp->d_type == DT_DIR || (dp->d_type == DT_LNK && S_ISDIR(sb.st_mode)))
 			dentp->flags |= DIR_OR_LINK_TO_DIR;
+
+		char newpath[PATH_MAX] __attribute__ ((aligned));
+		if (findfpath(newpath, mkpath(g_ctx[cfg.curctx].c_path, dentp->name, newpath))) {
+			dentp->flags |= FILE_COPIED;
+		}
 
 		++n;
 	} while ((dp = readdir(dirp)));
@@ -2871,7 +2779,7 @@ static void populate(char *path, char *lastname)
 	if (!ndents)
 		return;
 
-	if (!cfg.wild)
+	if (METHOD(cfg.sorting) != SORT_NONE)
 		qsort(dents, ndents, sizeof(*dents), entrycmp);
 
 #ifdef DBGMODE
@@ -2912,14 +2820,6 @@ static void redraw(char *path)
 		curscroll = MAX(0, cur - scrolloff);
 	else if (cur > curscroll + onscreen - scrolloff - 1)
 		curscroll = MIN(ndents - onscreen, cur - onscreen + scrolloff + 1);
-
-#ifdef DIR_LIMITED_COPY
-	if (cfg.copymode)
-		if (g_crc != crc8fast((uchar *)dents, ndents * sizeof(struct entry))) {
-			cfg.copymode = 0;
-			DPRINTF_S("selection off");
-		}
-#endif
 
 	/* Fail redraw if < than 11 columns, context info prints 10 chars */
 	if (ncols < 11) {
@@ -2972,7 +2872,7 @@ static void redraw(char *path)
 	} else
 		ncols -= 5;
 
-	if (!cfg.wild) {
+	if (METHOD(cfg.sorting) != SORT_NONE) {
 		attron(COLOR_PAIR(cfg.curctx + 1) | A_BOLD);
 		cfg.dircolor = 1;
 	}
@@ -2992,22 +2892,22 @@ static void redraw(char *path)
 		if (ndents) {
 			char sort[] = "\0y time ";
 
-			if (cfg.mtimeorder)
+			if (METHOD(cfg.sorting) == SORT_TIME)
 				sort[0] = 'b';
-			else if (cfg.sizeorder) {
+			else if (METHOD(cfg.sorting) == SORT_SIZE) {
 				sort[0] = 'b';
 				sort[3] = 's';
 				sort[5] = 'z';
 			}
 
 			/* We need to show filename as it may be truncated in directory listing */
-			if (!cfg.blkorder)
+			if (!USES_BLOCKS(cfg.sorting))
 				mvprintw(lastln, 0, "%d/%d %s[%s]\n", cur + 1, ndents, sort,
 					 unescape(dents[cur].name, NAME_MAX));
 			else {
 				xstrlcpy(buf, coolsize(dir_blocks << BLK_SHIFT), 12);
 
-				if (cfg.apparentsz)
+				if (METHOD(cfg.sorting) == SORT_APPARENTSIZE)
 					c = 'a';
 				else
 					c = 'd';
@@ -3029,7 +2929,7 @@ static void browse(char *ipath)
 	char mark[PATH_MAX] __attribute__ ((aligned));
 	char rundir[PATH_MAX] __attribute__ ((aligned));
 	char runfile[NAME_MAX + 1] __attribute__ ((aligned));
-	int r = -1, fd, presel, ncp = 0, copystartid = 0, copyendid = 0, onscreen;
+	int r = -1, fd, presel, onscreen;
 	enum action sel;
 	bool dir_changed = FALSE;
 	struct stat sb;
@@ -3083,8 +2983,7 @@ begin:
 	populate(path, lastname);
 	if (interrupted) {
 		interrupted = FALSE;
-		cfg.apparentsz = 0;
-		cfg.blkorder = 0;
+		cfg.sorting = SORT_ALPHABETIC;
 		BLK_SHIFT = 9;
 		presel = CONTROL('L');
 	}
@@ -3261,18 +3160,42 @@ nochange:
 				goto nochange;
 			}
 		case SEL_NEXT:
-			if (cur < ndents - 1)
-				++cur;
-			else if (ndents)
-				/* Roll over, set cursor to first entry */
-				cur = 0;
+			cur = (cur + 1) % ndents;
 			break;
 		case SEL_PREV:
-			if (cur > 0)
-				--cur;
-			else if (ndents)
-				/* Roll over, set cursor to last entry */
-				cur = ndents - 1;
+			cur = (cur + ndents - 1) % ndents;
+			break;
+		case SEL_RANGENEXT:
+			if (!(dents[cur].flags & FILE_COPIED)) {
+				appendfpath(newpath, mkpath(path, dents[cur].name, newpath));
+				dents[cur].flags |= FILE_COPIED;
+				break;
+			}
+			r = cur;
+			cur = (cur + 1) % ndents;
+			if (dents[cur].flags & FILE_COPIED) {
+				togglefpath(newpath, mkpath(path, dents[r].name, newpath));
+				dents[r].flags ^= FILE_COPIED;
+			} else {
+				appendfpath(newpath, mkpath(path, dents[cur].name, newpath));
+				dents[cur].flags |= FILE_COPIED;
+			}
+			break;
+		case SEL_RANGEPREV:
+			if (!(dents[cur].flags & FILE_COPIED)) {
+				appendfpath(newpath, mkpath(path, dents[cur].name, newpath));
+				dents[cur].flags |= FILE_COPIED;
+				break;
+			}
+			r = cur;
+			cur = (cur + ndents - 1) % ndents;
+			if (dents[cur].flags & FILE_COPIED) {
+				togglefpath(newpath, mkpath(path, dents[r].name, newpath));
+				dents[r].flags ^= FILE_COPIED;
+			} else {
+				appendfpath(newpath, mkpath(path, dents[cur].name, newpath));
+				dents[cur].flags |= FILE_COPIED;
+			}
 			break;
 		case SEL_PGDN: // fallthrough
 		case SEL_CTRL_D:
@@ -3462,6 +3385,7 @@ nochange:
 		case SEL_MFLTR: // fallthrough
 		case SEL_TOGGLEDOT: // fallthrough
 		case SEL_DETAIL: // fallthrough
+		case SEL_ALPHABETIC: // fallthrough
 		case SEL_FSIZE: // fallthrough
 		case SEL_ASIZE: // fallthrough
 		case SEL_BSIZE: // fallthrough
@@ -3486,55 +3410,46 @@ nochange:
 				cfg.showdetail ^= 1;
 				cfg.showdetail ? (printptr = &printent_long) : (printptr = &printent);
 				continue;
+			case SEL_ALPHABETIC:
+				if (METHOD(cfg.sorting) == SORT_ALPHABETIC)
+					cfg.sorting ^= REVERSE_SORT;
+				else
+					cfg.sorting = SORT_ALPHABETIC;
+				break;
 			case SEL_FSIZE:
-				cfg.sizeorder ^= 1;
-				cfg.mtimeorder = 0;
-				cfg.apparentsz = 0;
-				cfg.blkorder = 0;
-				cfg.copymode = 0;
-				cfg.wild = 0;
+				if (METHOD(cfg.sorting) == SORT_SIZE)
+					cfg.sorting ^= REVERSE_SORT;
+				else
+					cfg.sorting = SORT_SIZE;
 				break;
 			case SEL_ASIZE:
-				cfg.apparentsz ^= 1;
-				if (cfg.apparentsz) {
-					nftw_fn = &sum_sizes;
-					cfg.blkorder = 1;
-					BLK_SHIFT = 0;
-				} else
-					cfg.blkorder = 0; // fallthrough
+				if (METHOD(cfg.sorting) == SORT_APPARENTSIZE)
+					cfg.sorting ^= REVERSE_SORT;
+				else
+					cfg.sorting = SORT_APPARENTSIZE;
+				
+				nftw_fn = &sum_sizes;
+				BLK_SHIFT = 0;
+				break;
 			case SEL_BSIZE:
-				if (sel == SEL_BSIZE) {
-					if (!cfg.apparentsz)
-						cfg.blkorder ^= 1;
-					nftw_fn = &sum_bsizes;
-					cfg.apparentsz = 0;
-					BLK_SHIFT = ffs(S_BLKSIZE) - 1;
-				}
+				if (METHOD(cfg.sorting) == SORT_BLOCKS)
+					cfg.sorting ^= REVERSE_SORT;
+				else
+					cfg.sorting = SORT_BLOCKS;
 
-				if (cfg.blkorder) {
-					cfg.showdetail = 1;
-					printptr = &printent_long;
-				}
-				cfg.mtimeorder = 0;
-				cfg.sizeorder = 0;
-				cfg.copymode = 0;
-				cfg.wild = 0;
+				nftw_fn = &sum_bsizes;
+				BLK_SHIFT = ffs(S_BLKSIZE) - 1;
+				cfg.showdetail = 1;
+				printptr = &printent_long;
 				break;
 			case SEL_MTIME:
-				cfg.mtimeorder ^= 1;
-				cfg.sizeorder = 0;
-				cfg.apparentsz = 0;
-				cfg.blkorder = 0;
-				cfg.copymode = 0;
-				cfg.wild = 0;
+				if (METHOD(cfg.sorting) == SORT_TIME)
+					cfg.sorting ^= REVERSE_SORT;
+				else
+					cfg.sorting = SORT_TIME;
 				break;
 			default: /* SEL_WILD */
-				cfg.wild ^= 1;
-				cfg.mtimeorder = 0;
-				cfg.sizeorder = 0;
-				cfg.apparentsz = 0;
-				cfg.blkorder = 0;
-				cfg.copymode = 0;
+				cfg.sorting = SORT_NONE;
 				setdirwatch();
 				goto nochange;
 			}
@@ -3641,110 +3556,21 @@ nochange:
 		case SEL_COPY:
 			if (!ndents)
 				goto nochange;
-
-			if (cfg.copymode) {
-				/*
-				 * Clear the selection file on first copy.
-				 *
-				 * This ensures that when the first file path is
-				 * copied into memory (but not written to tmp file
-				 * yet to save on writes), the tmp file is cleared.
-				 * The user may be in the middle of selection mode op
-				 * and issue a cp, mv of multi-rm assuming the files
-				 * in the copy list would be affected. However, these
-				 * ops read the source file paths from the tmp file.
-				 */
-				if (!ncp)
-					writecp(NULL, 0);
-
-				r = mkpath(path, dents[cur].name, newpath);
-				appendfpath(newpath, r);
-
-				++ncp;
-			} else {
-				r = mkpath(path, dents[cur].name, newpath);
-
-				if (copybufpos) {
-					resetcpind();
-
-					/* Keep the copy buf in sync */
-					copybufpos = 0;
-				}
-				appendfpath(newpath, r);
-
-				writecp(newpath, r - 1); /* Truncate NULL from end */
-				spawn(copier, NULL, NULL, NULL, F_NOTRACE);
-			}
-
-			dents[cur].flags |= FILE_COPIED;
+			r = mkpath(path, dents[cur].name, newpath);
+			togglefpath(newpath, r);
+			dents[cur].flags ^= FILE_COPIED;
 			break;
-		case SEL_COPYMUL:
-			cfg.copymode ^= 1;
-			if (cfg.copymode) {
-				if (copybufpos) {
-					resetcpind();
-					writecp(NULL, 0);
-					copybufpos = 0;
-				}
-				g_crc = crc8fast((uchar *)dents, ndents * sizeof(struct entry));
-				copystartid = cur;
-				ncp = 0;
-				mvprintw(xlines - 1, 0, "selection on\n");
-				xdelay();
-				continue;
-			}
-
-			if (!ncp) { /* Handle range selection */
-#ifndef DIR_LIMITED_COPY
-				if (g_crc != crc8fast((uchar *)dents,
-						      ndents * sizeof(struct entry))) {
-					cfg.copymode = 0;
-					printwait("dir/content changed", &presel);
-					goto nochange;
-				}
-#endif
-				if (cur < copystartid) {
-					copyendid = copystartid;
-					copystartid = cur;
-				} else
-					copyendid = cur;
-			} // fallthrough
 		case SEL_COPYALL:
-			if (sel == SEL_COPYALL) {
-				if (!ndents)
-					goto nochange;
-
-				cfg.copymode = 0;
-				copybufpos = 0;
-				ncp = 0; /* Override single/multi path selection */
-				copystartid = 0;
-				copyendid = ndents - 1;
-			}
-
-			if ((!ncp && copystartid < copyendid) || sel == SEL_COPYALL) {
-				for (r = copystartid; r <= copyendid; ++r) {
+			for (r = 0; r < ndents; r++) {
+				if (!(dents[r].flags & FILE_COPIED)) {
 					appendfpath(newpath, mkpath(path, dents[r].name, newpath));
 					dents[r].flags |= FILE_COPIED;
 				}
-
-				ncp = copyendid - copystartid + 1;
-				mvprintw(xlines - 1, 0, "%d selected\n", ncp);
-				xdelay();
 			}
-
-			if (copybufpos) { /* File path(s) written to the buffer */
-				writecp(pcopybuf, copybufpos - 1); /* Truncate NULL from end */
-				spawn(copier, NULL, NULL, NULL, F_NOTRACE);
-
-				if (ncp) { /* Some files cherry picked */
-					mvprintw(xlines - 1, 0, "%d selected\n", ncp);
-					xdelay();
-				}
-			} else {
-				printwait("selection off", &presel);
-				goto nochange;
-			}
-			continue;
+			break;
+		case SEL_COPYNONE:
+			clearselection();
+			break;
 		case SEL_COPYLIST:
 			if (copybufpos) {
 				showcplist();
@@ -3755,54 +3581,40 @@ nochange:
 
 			printwait(messages[NONE_SELECTED], &presel);
 			goto nochange;
+		case SEL_RM:
 		case SEL_CP:
 		case SEL_MV:
-		case SEL_RMMUL:
-		{
-			if (!cpsafe()) {
-				presel = MSGWAIT;
-				goto nochange;
+			fd = 0;
+			if (copybufpos <= 1) {
+				fd = 1;
+				if (!ndents)
+					goto nochange;
+				r = mkpath(path, dents[cur].name, newpath);
+				appendfpath(newpath, r);
+				dents[cur].flags |= FILE_COPIED;
 			}
-
 			switch (sel) {
 			case SEL_CP:
-				cpstr(g_buf);
+				fd ? dupstr(g_buf) : cpstr(g_buf);
 				break;
 			case SEL_MV:
 				mvstr(g_buf);
 				break;
-			default: /* SEL_RMMUL */
+			default: /* SEL_RM */
 				rmmulstr(g_buf);
 				break;
 			}
 
+			writecp(pcopybuf, copybufpos - 1);
 			spawn("sh", "-c", g_buf, path, F_NORMAL);
+			clearselection();
 
 			if (ndents)
 				copycurname();
 			if (cfg.filtermode)
 				presel = FILTER;
 			goto begin;
-		}
-		case SEL_RM:
-		{
-			if (!ndents)
-				break;
 
-			mkpath(path, dents[cur].name, newpath);
-			xrm(newpath);
-
-			/* Don't optimize cur if filtering is on */
-			if (!cfg.filtermode && cur && access(newpath, F_OK) == -1)
-				--cur;
-
-			/* We reduce cur only if it is > 0, so it's at least 0 */
-			copycurname();
-
-			if (cfg.filtermode)
-				presel = FILTER;
-			goto begin;
-		}
 		case SEL_OPENWITH: // fallthrough
 		case SEL_RENAME:
 			if (!ndents)
@@ -3812,12 +3624,8 @@ nochange:
 		{
 			switch (sel) {
 			case SEL_ARCHIVE:
-				r = get_input("archive selection (else current)? [y/Y]");
+				r = get_input("archive selection (else current)? [y/N]");
 				if (r == 'y' || r == 'Y') {
-					if (!cpsafe()) {
-						presel = MSGWAIT;
-						goto nochange;
-					}
 					tmp = NULL;
 				} else if (!ndents) {
 					printwait("no files", &presel);
@@ -3855,7 +3663,7 @@ nochange:
 
 			/* Confirm if app is CLI or GUI */
 			if (sel == SEL_OPENWITH) {
-				r = get_input("cli mode? [y/Y]");
+				r = get_input("cli mode? [y/N]");
 				(r == 'y' || r == 'Y') ? (r = F_CLI)
 						       : (r = F_NOWAIT | F_NOTRACE | F_MULTI);
 			}
@@ -3909,7 +3717,7 @@ nochange:
 			if (faccessat(fd, tmp, F_OK, AT_SYMLINK_NOFOLLOW) != -1) {
 				if (sel == SEL_RENAME) {
 					/* Overwrite file with same name? */
-					r = get_input("overwrite? [y/Y]");
+					r = get_input("overwrite? [y/N]");
 					if (r != 'y' && r != 'Y') {
 						close(fd);
 						break;
@@ -4087,9 +3895,7 @@ nochange:
 			if (sel == SEL_QUITCD) {
 				/* In vim picker mode, clear selection and exit */
 				if (cfg.picker) {
-					/* Picker mode: reset buffer or clear file */
-					if (copybufpos)
-						cfg.pickraw ? copybufpos = 0 : writecp(NULL, 0);
+					clearselection();
 				} else if (!write_lastdir(path)) {
 					presel = MSGWAIT;
 					goto nochange;
@@ -4104,8 +3910,6 @@ nochange:
 			};
 
 			if (r != fd) {
-				bool copymode = cfg.copymode ? TRUE : FALSE;
-
 				g_ctx[fd].c_cfg.ctxactive = 0;
 
 				/* Switch to next active context */
@@ -4120,8 +3924,6 @@ nochange:
 
 				cfg = g_ctx[r].c_cfg;
 
-				/* Continue copy mode */
-				cfg.copymode = copymode;
 				cfg.curctx = r;
 				setdirwatch();
 				goto begin;
@@ -4263,7 +4065,7 @@ int main(int argc, char *argv[])
 	while ((opt = getopt(argc, argv, "Slib:denp:svwh")) != -1) {
 		switch (opt) {
 		case 'S':
-			cfg.blkorder = 1;
+			cfg.sorting = SORT_BLOCKS;
 			nftw_fn = sum_bsizes;
 			BLK_SHIFT = ffs(S_BLKSIZE) - 1;
 			break;
@@ -4311,7 +4113,7 @@ int main(int argc, char *argv[])
 			fprintf(stdout, "%s\n", VERSION);
 			return 0;
 		case 'w':
-			cfg.wild = 1;
+			cfg.sorting = SORT_NONE;
 			break;
 		case 'h':
 			usage();
