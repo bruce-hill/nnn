@@ -2816,6 +2816,8 @@ static void redraw(char *path)
 
 	if (ndents <= onscreen)
 		curscroll = 0;
+	else if (curscroll + onscreen >= ndents)
+		curscroll = ndents - onscreen;
 	else if (cur < curscroll + scrolloff)
 		curscroll = MAX(0, cur - scrolloff);
 	else if (cur > curscroll + onscreen - scrolloff - 1)
